@@ -13,8 +13,12 @@ app = Flask(__name__)
 class SimpleSubscriptionManager:
     def __init__(self):
         self.db_path = 'psychology_bot.db'
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.create_tables()
+        try:
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.create_tables()
+            logger.info("✅ База данных подписок инициализирована")
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации БД: {e}")
     
     def create_tables(self):
         cursor = self.conn.cursor()
@@ -71,9 +75,6 @@ def yookassa_webhook():
         
         # Обрабатываем успешный платеж
         if event_type == 'payment.succeeded' and payment_status == 'succeeded':
-            # Здесь можно добавить логику определения user_id из метаданных платежа
-            # Пока используем демо-логику
-            
             # Ищем user_id в метаданных платежа
             metadata = webhook_data.get('object', {}).get('metadata', {})
             user_id = metadata.get('user_id')
