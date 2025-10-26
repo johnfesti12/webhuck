@@ -1,89 +1,160 @@
 from flask import Flask, request, jsonify
-import os
-import sys
 from datetime import datetime
 import logging
+import os
+import sqlite3
+from datetime import datetime, timedelta
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Добавляем путь к проекту
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 app = Flask(__name__)
 
-# Глобальная переменная для бота
-bot = None
+class SimpleSubscriptionManager:
+    def __init__(self):
+        self.db_path = 'psychology_bot.db'
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.create_tables()
+    
+    def create_tables(self):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                user_id INTEGER PRIMARY KEY,
+                subscription_type TEXT NOT NULL DEFAULT 'free',
+                expiry_date TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        self.conn.commit()
+    
+    def add_premium_user(self, user_id, days=30):
+        """Добавить премиум подписку пользователю"""
+        try:
+            cursor = self.conn.cursor()
+            expiry_date = datetime.now() + timedelta(days=days)
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO subscriptions 
+                (user_id, subscription_type, expiry_date) 
+                VALUES (?, ?, ?)
+            ''', (user_id, 'premium', expiry_date))
+            
+            self.conn.commit()
+            logger.info(f"✅ Пользователю {user_id} добавлен премиум на {days} дней")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка добавления премиума: {e}")
+            return False
+
+# Инициализируем менеджер подписок
+sub_manager = SimpleSubscriptionManager()
 
 @app.route('/webhook/yookassa', methods=['POST', 'GET'])
 def yookassa_webhook():
-    """Endpoint для вебхуков от ЮKassa"""
     try:
         if request.method == 'GET':
-            logger.info("✅ Проверка доступности вебхука от ЮKassa")
+            logger.info("✅ ЮKassa проверяет вебхук")
             return jsonify({
                 "status": "ready", 
                 "service": "yookassa-webhook",
                 "timestamp": datetime.now().isoformat()
             }), 200
             
-        # Обработка POST запросов (вебхуков)
+        # Обработка POST запросов (реальные вебхуки)
         webhook_data = request.json
-        logger.info(f"🔔 Получен вебхук от ЮKassa: {webhook_data.get('event')}")
+        event_type = webhook_data.get('event', 'unknown')
+        payment_id = webhook_data.get('object', {}).get('id', 'unknown')
+        payment_status = webhook_data.get('object', {}).get('status', 'unknown')
         
-        if bot and hasattr(bot, 'payment_handler'):
-            success = bot.payment_handler.process_webhook(webhook_data)
-            logger.info(f"📊 Вебхук обработан: {success}")
-            return jsonify({"success": success}), 200
-        else:
-            logger.error("❌ Бот не инициализирован в вебхук-сервере")
-            # Сохраняем вебхук для последующей обработки
-            return jsonify({"error": "Bot not initialized", "received": True}), 202
+        logger.info(f"🔔 Получен вебхук: {event_type}, статус: {payment_status}, ID: {payment_id}")
+        
+        # Обрабатываем успешный платеж
+        if event_type == 'payment.succeeded' and payment_status == 'succeeded':
+            # Здесь можно добавить логику определения user_id из метаданных платежа
+            # Пока используем демо-логику
+            
+            # Ищем user_id в метаданных платежа
+            metadata = webhook_data.get('object', {}).get('metadata', {})
+            user_id = metadata.get('user_id')
+            
+            if user_id:
+                try:
+                    user_id = int(user_id)
+                    success = sub_manager.add_premium_user(user_id, 30)
+                    if success:
+                        logger.info(f"🎉 Подписка активирована для пользователя {user_id}")
+                        return jsonify({
+                            "success": True, 
+                            "message": "Subscription activated",
+                            "user_id": user_id,
+                            "days_added": 30
+                        }), 200
+                except (ValueError, TypeError) as e:
+                    logger.error(f"❌ Неверный user_id: {user_id}")
+            
+            # Если user_id не найден, просто логируем
+            logger.info(f"💰 Платеж успешен, но user_id не найден. ID платежа: {payment_id}")
+            return jsonify({
+                "success": True, 
+                "message": "Payment received, but user_id not found in metadata",
+                "payment_id": payment_id
+            }), 200
+        
+        return jsonify({
+            "success": True, 
+            "message": "Webhook received",
+            "event": event_type,
+            "payment_id": payment_id
+        }), 200
             
     except Exception as e:
-        logger.error(f"❌ Ошибка в вебхуке: {e}")
+        logger.error(f"❌ Ошибка обработки вебхука: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Проверка здоровья сервера"""
     return jsonify({
-        "status": "healthy", 
-        "service": "yookassa-webhook",
+        "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "bot_initialized": bot is not None
+        "service": "yookassa-webhook",
+        "version": "2.0",
+        "webhook_url": "https://yookassa-webhook-5soq.onrender.com/webhook/yookassa"
     })
+
+@app.route('/test_activate/<int:user_id>', methods=['GET'])
+def test_activate(user_id):
+    """Тестовый endpoint для активации подписки"""
+    try:
+        success = sub_manager.add_premium_user(user_id, 30)
+        if success:
+            return jsonify({
+                "success": True,
+                "message": f"Test subscription activated for user {user_id}",
+                "user_id": user_id,
+                "days": 30
+            }), 200
+        else:
+            return jsonify({"error": "Failed to activate subscription"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/')
 def home():
     return jsonify({
         "message": "Yookassa Webhook Server", 
         "status": "active",
-        "endpoints": {
-            "webhook": "/webhook/yookassa [GET, POST]",
-            "health": "/health [GET]"
-        }
+        "endpoints": [
+            {"path": "/webhook/yookassa", "methods": ["GET", "POST"], "description": "Основной вебхук для ЮKassa"},
+            {"path": "/health", "methods": ["GET"], "description": "Проверка здоровья сервера"},
+            {"path": "/test_activate/<user_id>", "methods": ["GET"], "description": "Тест активации подписки"},
+            {"path": "/", "methods": ["GET"], "description": "Информация о сервере"}
+        ]
     })
 
-def init_bot():
-    """Инициализация бота для вебхук-сервера"""
-    global bot
-    try:
-        from bot_deepseek import DeepSeekPsychoBot
-        bot = DeepSeekPsychoBot()
-        logger.info("✅ Бот инициализирован в вебхук-сервере")
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации бота: {e}")
-        bot = None
-
 if __name__ == '__main__':
-    # Инициализируем бота при запуске
-    init_bot()
-    
-    # Запускаем сервер
     port = int(os.getenv('PORT', 5000))
-    host = '0.0.0.0'
-    
-    logger.info(f"🚀 Запуск вебхук-сервера на {host}:{port}")
-    app.run(host=host, port=port, debug=False)
+    logger.info(f"🚀 Запуск вебхук-сервера на порту {port}")
+    logger.info(f"🔗 Основной URL: https://yookassa-webhook-5soq.onrender.com")
+    logger.info(f"🎯 Вебхук endpoint: /webhook/yookassa")
+    app.run(host='0.0.0.0', port=port, debug=False)
